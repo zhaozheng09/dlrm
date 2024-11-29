@@ -60,7 +60,7 @@ def _get_random_dataloader(
             manual_seed=getattr(args, "seed", None),
             ids_per_feature=1,
             num_dense=len(DEFAULT_INT_NAMES),
-            num_batches=num_batches,
+            num_batches=2000,
         ),
         batch_size=None,
         batch_sampler=None,

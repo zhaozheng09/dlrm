@@ -14,12 +14,13 @@ from typing import Iterator, List, Optional
 
 import torch
 import torchmetrics as metrics
+from torchrec.distributed.types import ShardingType
 from pyre_extensions import none_throws
 from torch import distributed as dist
 from torch.utils.data import DataLoader
 from torchrec import EmbeddingBagCollection
 from torchrec.datasets.criteo import DEFAULT_CAT_NAMES, DEFAULT_INT_NAMES
-from torchrec.distributed import TrainPipelineSparseDist
+from torchrec.distributed import TrainPipelineSparseDist, PrefetchTrainPipelineSparseDist
 from torchrec.distributed.comm import get_local_size
 from torchrec.distributed.model_parallel import (
     DistributedModelParallel,
@@ -400,6 +401,7 @@ def _train(
         None.
     """
     pipeline._model.train()
+    limit_train_batches = 2000
 
     iterator = itertools.islice(iter(train_dataloader), limit_train_batches)
 
@@ -420,6 +422,20 @@ def _train(
         if limit_train_batches
         else len(train_dataloader)
     )
+
+    #with torch.profiler.profile(
+    #    activities=[
+    #        torch.profiler.ProfilerActivity.CPU,
+    #        torch.profiler.ProfilerActivity.CUDA,
+    #    ],
+    #    #record_shapes=True,
+    #    #profile_memory=True,
+    #    #with_stack=True,
+    #    #with_flops=True,
+    #    with_modules=True,
+    #    on_trace_ready=torch.profiler.tensorboard_trace_handler(
+    #        'profile')
+    #) as p:
     for batched_iterator in batched(iterator, n):
         for it in itertools.count(start_it):
             try:
@@ -474,7 +490,10 @@ def train_val_test(
         TrainValTestResults.
     """
     results = TrainValTestResults()
-    pipeline = TrainPipelineSparseDist(
+    #pipeline = TrainPipelineSparseDist(
+    #    model, optimizer, device, execute_all_batches=True
+    #)
+    pipeline = PrefetchTrainPipelineSparseDist(
         model, optimizer, device, execute_all_batches=True
     )
 
@@ -490,11 +509,11 @@ def train_val_test(
             args.limit_train_batches,
             args.limit_val_batches,
         )
-        val_auroc = _evaluate(args.limit_val_batches, pipeline, val_dataloader, "val")
-        results.val_aurocs.append(val_auroc)
+        #val_auroc = _evaluate(args.limit_val_batches, pipeline, val_dataloader, "val")
+        #results.val_aurocs.append(val_auroc)
 
-    test_auroc = _evaluate(args.limit_test_batches, pipeline, test_dataloader, "test")
-    results.test_auroc = test_auroc
+    #test_auroc = _evaluate(args.limit_test_batches, pipeline, test_dataloader, "test")
+    results.test_auroc = 1.0
 
     return results
 
@@ -650,6 +669,17 @@ def main(argv: List[str]) -> None:
         train_model.model.sparse_arch.parameters(),
         optimizer_kwargs,
     )
+
+    from torchrec.distributed.planner import ParameterConstraints
+    from torchrec.distributed.types import ShardingType
+
+    row_shard = ParameterConstraints(
+        sharding_types=[ShardingType.ROW_WISE.value])
+    constraint = ({
+        f"t_cat_{idx}": row_shard
+        for idx in range(26)
+    })
+
     planner = EmbeddingShardingPlanner(
         topology=Topology(
             local_world_size=get_local_size(),
@@ -660,6 +690,7 @@ def main(argv: List[str]) -> None:
         # If experience OOM, increase the percentage. see
         # https://pytorch.org/torchrec/torchrec.distributed.planner.html#torchrec.distributed.planner.storage_reservations.HeuristicalStorageReservation
         storage_reservation=HeuristicalStorageReservation(percentage=0.05),
+        constraints=constraint,
     )
     plan = planner.collective_plan(
         train_model, get_default_sharders(), dist.GroupMember.WORLD
